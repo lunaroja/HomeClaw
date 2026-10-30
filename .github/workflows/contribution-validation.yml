@@ -1,0 +1,190 @@
+# Fork-only validation; keep this workflow out of upstream contribution branches.
+name: Contribution validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact contribution commit to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contribution-validation-${{ inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    if: github.repository == 'lunaroja/HomeClaw'
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+          with:
+            ref: ${{ inputs.ref }}
+            persist-credentials: false
+
+      - name: Verify HomeKit entitlement
+        run: |
+          if ! grep -q 'com.apple.developer.homekit' Resources/HomeClaw.entitlements; then
+            echo "::error::HomeKit entitlement missing from HomeClaw.entitlements — readValue() will silently fail"
+            exit 1
+          fi
+
+      - name: Build homeclaw-cli
+        run: swift build --product homeclaw-cli
+
+      - name: Run Swift CLI tests (not Catalyst coverage)
+        run: swift test
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
+        with:
+          node-version: 24
+
+      - name: Verify patched npm archive against pinned official sources
+        run: python3 scripts/rebuild-security-npm.py --check
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Audit the complete dependency tree
+        run: npm audit
+
+      - name: Verify native MCP schema parity
+        run: |
+          node --test scripts/check-mcp-schema-parity.test.mjs
+          node --test scripts/check-openclaw-failure.test.mjs
+          node scripts/check-mcp-schema-parity.mjs
+
+      - name: Build MCP server
+        run: npm run build:mcp
+
+      - name: Test MCP freshness contract
+        run: npm run test:mcp
+
+  catalyst:
+    name: Catalyst App
+    if: github.repository == 'lunaroja/HomeClaw'
+    # macos-26 carries Xcode 26.x only, so the .xcode-version pin below could
+    # never match there; Xcode 27 lives on the xcode-27 image.
+    runs-on: xcode-27
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+          with:
+            ref: ${{ inputs.ref }}
+            persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
+        with:
+          node-version: 24
+
+      # The Xcode build phase compiles openclaw/dist via tsc, resolved from
+      # node_modules before falling back to npx.
+      - name: Verify patched npm archive against pinned official sources
+        run: python3 scripts/rebuild-security-npm.py --check
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      # Honor .xcode-version when the runner image has that Xcode, so CI compiles
+      # with the same toolchain as local and release builds. Runner images lag
+      # behind newly seeded betas, so a miss warns and continues rather than
+      # failing — CI's job here is to prove the target compiles, and doing that
+      # on a slightly older Xcode is far better than not doing it at all.
+      - name: Select pinned Xcode
+        run: |
+          PIN="$(tr -d '[:space:]' < .xcode-version 2>/dev/null || true)"
+          if [[ -z "$PIN" ]]; then
+            echo "No .xcode-version pin; using runner default."
+          else
+            MATCH=""
+            for app in /Applications/Xcode*.app; do
+              [[ -d "$app" ]] || continue
+              V="$(defaults read "$app/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || true)"
+              echo "found $app ($V)"
+              [[ "$V" == "$PIN" ]] && MATCH="$app"
+            done
+            if [[ -n "$MATCH" ]]; then
+              echo "Selecting pinned Xcode $PIN at $MATCH"
+              sudo xcode-select -s "$MATCH/Contents/Developer"
+            else
+              echo "::warning::.xcode-version pins Xcode $PIN, not present on this runner. Building with the default instead."
+            fi
+          fi
+          xcodebuild -version
+
+      - name: Verify CI evidence harness and settings wiring
+        run: |
+          python3 scripts/test-ci-evidence.py -v
+          python3 scripts/test-integration-settings.py -v
+
+      - name: Verify generated HomeKit entitlement
+        run: |
+          python3 - <<'PY'
+          import plistlib
+          with open('Resources/HomeClaw.entitlements', 'rb') as handle:
+              entitlements = plistlib.load(handle)
+          assert entitlements.get('com.apple.developer.homekit') is True
+          assert 'group.com.shahine.homeclaw' in entitlements.get('com.apple.security.application-groups', [])
+          PY
+
+      # SPM runs CLI tests only. This builds and executes every app-hosted
+      # HomeClawTests case, without filters/skips. Unsigned execution is not
+      # evidence of HomeKit provisioning or distribution signing.
+      - name: Run full Catalyst HomeClawTests (no signing)
+        timeout-minutes: 25
+        env:
+          CATALYST_EVIDENCE_DIR: ${{ runner.temp }}/catalyst-test-evidence
+        run: bash scripts/test-catalyst.sh
+
+      - name: Upload Catalyst test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: catalyst-homeclawtests-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/catalyst-test-evidence/xcodebuild.log
+            ${{ runner.temp }}/catalyst-test-evidence/xcodebuild-exit-status.txt
+            ${{ runner.temp }}/catalyst-test-evidence/summary.json
+            ${{ runner.temp }}/catalyst-test-evidence/tests.json
+            ${{ runner.temp }}/catalyst-test-evidence/HomeClawTests.xcresult
+
+  version-check:
+    name: Version Consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: omarshahine/version-consistency-action@de358297133489498bca32eaea89a296e9e4a5b0  # v1
+        with:
+          sets: |
+            - name: "HomeClaw plugin"
+              sources:
+                - package.json:.version
+                - openclaw/package.json:.version
+                - openclaw/openclaw.plugin.json:.version
+                - mcp-server/package.json:.version
+                - .claude-plugin/plugin.json:.version
+                - .claude-plugin/marketplace.json:.plugins[0].version
+
+      # OpenClaw drops any agent tool missing from the manifest's
+      # contracts.tools, so keep it in lockstep with the TOOLS array.
+      - name: Check OpenClaw tool contracts
+        run: node scripts/check-openclaw-contracts.mjs
