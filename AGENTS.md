@@ -1,3 +1,43 @@
+<!-- second-brain-repository-bootstrap:v1 -->
+
+# Repository agent guide
+
+This repository extends Abraham's canonical agent contract at
+`/Users/abraham/src/second-brain/AGENTS.md`. Repository-specific instructions
+below add to that contract; they do not replace it.
+
+## Required task-start synchronization
+
+Before substantive work or a substantive response in a new task:
+
+1. Run `.codex/bin/repository-preflight` from anywhere inside this repository.
+2. If it reports a dirty, detached, untracked, or diverged checkout, preserve
+   the existing work and report the exact synchronization blocker. Never reset,
+   clean, force, or overwrite work to make the preflight pass.
+3. After a successful pull, read the current Second Brain `AGENTS.md`, then this
+   file, before acting. Start a new task if pulled instruction changes must be
+   loaded by the runtime immediately.
+
+The preflight verifies the global Second Brain link and performs only
+fast-forward pulls for clean checkouts with tracking branches.
+
+## Repository-specific instructions
+
+Add this repository's purpose, validation commands, deployment workflow,
+privacy boundaries, and source-of-truth rules here as they become known. Keep
+cross-project identity, preferences, credentials, and delivery policy in Second
+Brain.
+
+## Fork ownership
+
+This fork owns the scoped doorbell input-event contribution authorized under
+Home Assistant #295. Production integration and household evidence stay in
+`/Users/abraham/src/homeassistant`. Never include household identifiers or live
+snapshots in public contributions. Keep this personal scaffold on fork main;
+upstream PR branches start from freshly fetched upstream/main and exclude it.
+
+## Upstream guide (preserved)
+
 # HomeClaw
 
 HomeClaw exposes Apple HomeKit accessories via a CLI tool, plugins for Claude Code and OpenClaw, and a stdio MCP server for Claude Desktop. It uses a unified Mac Catalyst architecture with an AppKit bridge bundle for the macOS menu bar.
